@@ -13,6 +13,10 @@ from .ring_attn_utils import gather_and_pad_tensor, unpad_and_slice_tensor
 from .utils import compute_entropy, log_probs_from_logits
 
 
+
+from openrlhf.extensions.moe.configuration_llama_moe import LlamaMoEConfig
+from openrlhf.extensions.moe.modeling_llama_moe import LlamaMoEForCausalLM
+
 class Actor(nn.Module):
     """
     Base class for Actor models in reinforcement learning.
@@ -84,10 +88,10 @@ class Actor(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            self.model = model_class.from_pretrained(
+            self.model = LlamaMoEForCausalLM.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
-                attn_implementation=attn_impl,
+                attn_implementation="eager",
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else "auto",
                 device_map=device_map,

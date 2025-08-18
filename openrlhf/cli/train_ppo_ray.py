@@ -476,6 +476,8 @@ if __name__ == "__main__":
 
     if args.agent_func_path:
         args.remote_rm_url = "agent"
+        
+    print(f"1111111 args.advantage_estimator  {args.advantage_estimator}")
 
     if args.advantage_estimator not in ["gae"]:
         args.critic_pretrain = None

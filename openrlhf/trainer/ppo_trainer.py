@@ -503,7 +503,7 @@ class PPOTrainer(BasePPOTrainer):
                     filtered_samples = []
                     number_of_samples = 0
 
-                experiences = self.experience_maker.make_experience_batch(rollout_samples)
+                experiences = self.experience_maker.make_experience_batch(rollout_samples, steps)
                 sample0 = self.tokenizer.batch_decode(
                     experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
                 )

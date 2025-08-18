@@ -15,6 +15,13 @@ from openrlhf.utils.seqlen_balancing import get_minimum_num_micro_batch_size, ge
 from openrlhf.utils.utils import remove_pad_token, zero_pad_sequences
 
 logger = init_logger(__name__)
+def save_strings_to_txt(queries_list: list, file_path: str) -> None:
+    with open(file_path, 'w', encoding='utf-8') as f:
+        for line in queries_list:
+            f.write(line.replace("\n", " ") + '\n')
+            f.write("********************************************************************************* \n")
+
+    print(f"save {file_path}， {len(queries_list)} lines")
 
 
 def to(tensor: Union[torch.Tensor, list[torch.Tensor]], device):
@@ -487,7 +494,7 @@ class RemoteExperienceMaker(ABC):
         return samples_list
 
     @torch.no_grad()
-    def make_experience_batch(self, rollout_samples) -> List[Experience]:
+    def make_experience_batch(self, rollout_samples, step) -> List[Experience]:
         """
         Make a list of experience with the micro_rollout_batch_size.
 
@@ -499,14 +506,14 @@ class RemoteExperienceMaker(ABC):
         samples_list = self.split_rollout_samples(rollout_samples)
 
         # Make experiences (models forward: logprobs, values, rewards, and kl divergence)
-        experiences = self.make_experience(samples_list)
+        experiences = self.make_experience(samples_list, step)
 
         # Process experiences (reward shaping, etc.)
         experiences = self.compute_advantages_and_returns(experiences)
         return experiences
 
     @torch.no_grad()
-    def make_experience(self, samples_list: List[Experience]) -> List[Experience]:
+    def make_experience(self, samples_list: List[Experience], steps) -> List[Experience]:
         """
         Turn samples into experience by calculating logprobs, values, rewards, and kl divergence.
         """
@@ -536,6 +543,28 @@ class RemoteExperienceMaker(ABC):
             prompts_list = sum([s.prompts for s in samples_list], [])
             labels_list = sum([s.labels for s in samples_list], [])
             # Keep the remote call asynchronous
+
+            if (steps - 1) % 100 == 0:
+                    save_strings_to_txt(queries_list, f"/root/MoE-Post-Tuning/data/example_list/prompt_answer{str(steps)}.txt")
+
+
+
+
+            action_mask_pad = []
+            for action_mask in action_mask_list:
+                zeros_col = torch.zeros((action_mask.size(0), 1), dtype=action_mask.dtype)
+                restored_mask_cat = torch.cat([zeros_col, action_mask], dim=1)
+                action_mask_pad.append(restored_mask_cat)
+
+            queries_list = []  # 初始化空列表保存结果
+            for seq, mask in zip(sequences_list, action_mask_pad):
+                masked_seq = [seq[i][mask[i].bool()] for i in range(seq.shape[0])]
+                decoded_texts = self.tokenizer.batch_decode(masked_seq, skip_special_tokens=False)
+                queries_list.extend(decoded_texts)
+            if (steps - 1) % 100 == 0:
+                save_strings_to_txt(queries_list, f"/root/MoE-Post-Tuning/data/example_list/answer{str(steps)}.txt")
+
+
             r_refs = self.remote_reward_model.get_rewards.remote(queries_list, prompts_list, labels_list)
         else:
             # Batch call reward model

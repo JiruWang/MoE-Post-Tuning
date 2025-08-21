@@ -22,7 +22,10 @@ from typing import Callable, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
-
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+        DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from .utils import PPMissingLayer, maybe_offload_to_cpu
+from vllm.distributed import get_pp_group
 
 import math
 import warnings
@@ -73,7 +76,7 @@ from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
 """ PyTorch LLaMA-MoE model."""
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Protocol
 import math
 import torch
 import torch.utils.checkpoint
@@ -96,10 +99,6 @@ from .llama import *
 from .llama_moeconfig import LlamaMoEConfig
 from transformers.utils import ModelOutput, logging
 
-# from smoe.models.llama_moe.configuration_llama_moe import LlamaMoEConfig
-# from smoe.modules.moe.moe_layers import LinearGLUMoELayer, MoEMlpOutput
-# from smoe.modules.norm import WeightNorm
-
 
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask
@@ -111,6 +110,36 @@ from transformers.integrations import use_kernel_forward_from_hub
 
 logger = logging.get_logger(__name__)
 
+
+_ORIG_LLAMAMODEL_INIT = LlamaModel.__init__
+
+
+
+class LayerFn(Protocol):
+
+    def __call__(self, prefix: str) -> torch.nn.Module:
+        ...
+
+def make_moe_layers(
+    num_hidden_layers: int,
+    layer_fn: LayerFn,
+    prefix: str,
+) -> Tuple[int, int, torch.nn.ModuleList]:
+    """Make a list of layers with the given layer function, taking
+    pipeline parallelism into account.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+    start_layer, end_layer = get_pp_indices(num_hidden_layers,
+                                            get_pp_group().rank_in_group,
+                                            get_pp_group().world_size)
+
+    modules = torch.nn.ModuleList(
+        [PPMissingLayer() for _ in range(start_layer)] + [
+            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}", layer_index=idx))
+            for idx in range(start_layer, end_layer)
+        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+    return start_layer, end_layer, modules
 
 class LinearGLUExperts(nn.Module):
     """
@@ -588,7 +617,6 @@ class LlamaMoEDecoderLayer(LlamaDecoderLayer):
             "dropped_padding": config.dropped_padding,
             "capacity_factor": config.capacity_factor,
         }
-
         self.mlp = LinearGLUMoELayer(
             input_size=self.hidden_size,
             hidden_size=config.intermediate_size,
@@ -607,13 +635,68 @@ class LlamaMoEDecoderLayer(LlamaDecoderLayer):
         )
 
 
+
+
+
+def _patched_llama_model_init(self, *, vllm_config, prefix="", layer_type: type[nn.Module] = LlamaMoEDecoderLayer):
+    # 调用 nn.Module 的 init，保证能注册子模块
+    nn.Module.__init__(self)
+
+    config = vllm_config.model_config.hf_config
+    cache_config = vllm_config.cache_config
+    quant_config = vllm_config.quant_config
+    lora_config = vllm_config.lora_config
+
+    self.config = config
+    self.quant_config = quant_config
+    lora_vocab = (lora_config.lora_extra_vocab_size *
+                    (lora_config.max_loras or 1)) if lora_config else 0
+    self.vocab_size = config.vocab_size + lora_vocab
+    self.org_vocab_size = config.vocab_size
+    if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                        and get_pp_group().is_last_rank):
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
+        )
+    else:
+        self.embed_tokens = PPMissingLayer()
+
+    self._init_layers(vllm_config, prefix, layer_type)
+    if get_pp_group().is_last_rank:
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+    else:
+        self.norm = PPMissingLayer()
+
+    self.aux_hidden_state_layers: tuple[int] = tuple()
+
+    self.make_empty_intermediate_tensors = (
+        make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
+
+LlamaModel.__init__ = _patched_llama_model_init
+
+
+
 # # @auto_docstring
 class LlamaMoEModel(LlamaModel):
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, layer_type=LlamaMoEDecoderLayer)
+    def _init_layers(self, vllm_config, prefix, layer_type):
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.start_layer, self.end_layer, self.layers = make_moe_layers(
+            config.num_hidden_layers,
+            lambda prefix, layer_index: LlamaMoEDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+                layer_index=layer_index,
+            ),
+            prefix=f"{prefix}.layers",
+        )
         
 
     def set_input_embeddings(self, value):

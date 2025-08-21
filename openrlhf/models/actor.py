@@ -87,8 +87,11 @@ class Actor(nn.Module):
                 model_class = AutoLigerKernelForCausalLM
             else:
                 model_class = AutoModelForCausalLM
+            
+            if "MoE" in pretrain_or_model:
+                model_class = LlamaMoEForCausalLM
 
-            self.model = LlamaMoEForCausalLM.from_pretrained(
+            self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
                 attn_implementation="eager",

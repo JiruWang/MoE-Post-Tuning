@@ -97,6 +97,8 @@ class BasePPOTrainer(ABC):
                 name=self.strategy.args.wandb_run_name,
                 config=self.strategy.args.__dict__,
                 reinit=True,
+                mode="offline",
+                dir="/root/autodl-tmp/logs"
             )
 
             wandb.define_metric("train/global_step")
@@ -337,7 +339,7 @@ class BasePPOTrainer(ABC):
                 strategy,
                 dataset_split=self.eval_split,
             )
-            eval_data = eval_data.select(range(min(args.max_samples, len(eval_data))))
+            eval_data = eval_data.select(range(100))
             eval_dataset = PromptDataset(eval_data, self.tokenizer, strategy, input_template=args.input_template)
             eval_dataloader = strategy.setup_dataloader(eval_dataset, 1, True, False)
         else:

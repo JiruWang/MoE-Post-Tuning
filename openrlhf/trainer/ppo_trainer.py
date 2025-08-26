@@ -20,6 +20,13 @@ from openrlhf.utils.utils import get_tokenizer
 logger = init_logger(__name__)
 
 
+def save_list_to_txt(text_list, filename):
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        for text in text_list:
+            f.write(text + '\n')
+        print(f"save to {filename}")
+
 class BasePPOTrainer(ABC):
     def __init__(
         self,
@@ -208,8 +215,8 @@ class BasePPOTrainer(ABC):
             ref = self.actor_model_group.async_run_method(
                 method_name="save_checkpoint", tag=tag, client_states=client_states
             )
-            if self.critic_model_group is not None:
-                ref.extend(self.critic_model_group.async_run_method(method_name="save_checkpoint", tag=tag))
+            # if self.critic_model_group is not None:
+            #     ref.extend(self.critic_model_group.async_run_method(method_name="save_checkpoint", tag=tag))
             ray.get(ref)
 
     def evaluate(self, eval_dataloader, global_step, temperature=0.6, n_samples_per_prompt=1):
@@ -331,6 +338,27 @@ class BasePPOTrainer(ABC):
             True,
         )
 
+
+
+        gen_data = blending_datasets(
+            "/root/MoE-Post-Tuning/data/test_base.json",
+            None,
+            strategy,
+            args.seed,
+            max_count=10,
+            dataset_split=self.prompt_split,
+        )
+
+        # Create train dataset
+        gen_data = gen_data.select(range(min(10, len(gen_data))))
+        gen_dataset = PromptDataset(gen_data, self.tokenizer, strategy, input_template=args.input_template)
+        gen_dataloader = strategy.setup_dataloader(
+            gen_dataset,
+            args.vllm_generate_batch_size,
+            True,
+            True,
+        )
+
         # Create eval dataset if eval data exists
         if getattr(args, "eval_dataset", None):
             eval_data = blending_datasets(
@@ -346,6 +374,7 @@ class BasePPOTrainer(ABC):
             eval_dataloader = None
 
         self.prompts_dataloader = prompts_dataloader
+        self.gen_dataloader = gen_dataloader
         self.eval_dataloader = eval_dataloader
         self.max_steps = (
             len(prompts_dataset)
@@ -523,6 +552,18 @@ class PPOTrainer(BasePPOTrainer):
                 ray.get(refs)
 
                 status = self.ppo_train(steps)
+                if (steps - 1) % 20 == 0:
+                    gen_samples = []
+                    for _, gen_prompts, labels in self.gen_dataloader:
+                        print(gen_prompts)
+                        remote_reward_model = self.remote_reward_model if self.args.dynamic_filtering else None
+                        rollout_samples = self.samples_generator.generate_samples(gen_prompts, labels, remote_reward_model=remote_reward_model, **self.generate_kwargs)
+                        gen_samples.appemd(f"{gen_prompts.sequences}\001{gen_prompts.labels}")
+                
+                    save_list_to_txt(gen_samples, f"/root/MoE-Post-Tuning/data/example_list/save_text_{str(steps)}.txt")
+
+                
+                
 
                 if "kl" in status:
                     self.kl_ctl.update(status["kl"], args.rollout_batch_size * args.n_samples_per_prompt)

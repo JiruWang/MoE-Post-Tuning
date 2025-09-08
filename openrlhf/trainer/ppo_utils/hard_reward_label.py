@@ -1,8 +1,24 @@
-from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig, parse
-import torch
-extraction_target = (ExprExtractionConfig(), LatexExtractionConfig())
-import re
 
+import re
+import torch
+
+from math_verify import verify, parse
+
+
+
+def is_number(s):
+    try:  
+        float(s)
+        return True
+    except ValueError:  
+        pass 
+    try:
+        import unicodedata  
+        unicodedata.numeric(s)  
+        return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def reward_func(sequences, _, answers):
@@ -13,34 +29,34 @@ def reward_func(sequences, _, answers):
 
     for sequence, answer, __  in zip(sequences, answers, _):
 
-        extracted = parse(sequence, extraction_config=extraction_target)
-        gold = answer
+        extracted = parse(sequence)
+        if len(extracted) < 2:
+            print(extracted)
         try:
-            pred = float(extracted[1])
-            is_equal = abs(pred - float(gold)) < 1e-10
-        except (ValueError, TypeError, AttributeError, IndexError) as e:
-            is_equal = False
-
-        if is_equal:
-            accuracy_reward = 1.0
-        else:
-            accuracy_reward = 0.0
+            extracted[0] = int(extracted[0])
+            extracted[1] = str(int(float(extracted[1])))
+            accuracy = verify(extracted, answer)
+            if accuracy:
+                accuracy_reward = 1
+            else:
+                accuracy_reward = 0
+        except (ValueError, TypeError, IndexError) as e:
+            accuracy_reward = 0 
         
-
-        boxed_pattern = r'\\boxed\{([^}]*)\}'
+       
+        boxed_pattern = r'boxed\{([^}]*)\}'
         matches = re.findall(boxed_pattern, sequence)
         
         if not matches:
             format_reward = 0.0
+        elif is_number(matches[-1]) and float(matches[-1]) == float(answer):
+            format_reward = 1.0
         else:
-            try:
-                if float(matches[-1].strip()) == float(gold):
-                    format_reward = 1.0
-                else:
-                    format_reward = 0.5
-            except (ValueError, TypeError, AttributeError, IndexError) as e:
-                format_reward = 0.5
-        print(matches)
+            format_reward = 0.5
+
+
+
+        
         total_reward = format_reward + accuracy_reward
 
         format_r.append(format_reward)

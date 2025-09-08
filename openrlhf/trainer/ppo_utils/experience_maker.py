@@ -535,36 +535,18 @@ class RemoteExperienceMaker(ABC):
         elif self.remote_rm_url:
             queries_list = sum(
                 [
-                    self.tokenizer.batch_decode(remove_pad_token(seq, attention_mask), skip_special_tokens=False)
-                    for seq, attention_mask in zip(sequences_list, attention_mask_list)
+                    self.tokenizer.batch_decode(remove_pad_token(seq, attention_mask, action_mask), skip_special_tokens=False)
+                    for seq, attention_mask, action_mask in zip(sequences_list, attention_mask_list, action_mask_list)
                 ],
                 [],
             )
             prompts_list = sum([s.prompts for s in samples_list], [])
             labels_list = sum([s.labels for s in samples_list], [])
-            # Keep the remote call asynchronous
 
+            
+            # Keep the remote call asynchronous
             if (steps - 1) % 100 == 0:
                     save_strings_to_txt(queries_list, f"/root/MoE-Post-Tuning/data/example_list/prompt_answer{str(steps)}.txt")
-
-
-
-
-            action_mask_pad = []
-            for action_mask in action_mask_list:
-                zeros_col = torch.zeros((action_mask.size(0), 1), dtype=action_mask.dtype)
-                restored_mask_cat = torch.cat([zeros_col, action_mask], dim=1)
-                action_mask_pad.append(restored_mask_cat)
-
-            queries_list = []  # 初始化空列表保存结果
-            for seq, mask in zip(sequences_list, action_mask_pad):
-                masked_seq = [seq[i][mask[i].bool()] for i in range(seq.shape[0])]
-                decoded_texts = self.tokenizer.batch_decode(masked_seq, skip_special_tokens=False)
-                queries_list.extend(decoded_texts)
-            if (steps - 1) % 100 == 0:
-                save_strings_to_txt(queries_list, f"/root/MoE-Post-Tuning/data/example_list/answer{str(steps)}.txt")
-
-
             r_refs = self.remote_reward_model.get_rewards.remote(queries_list, prompts_list, labels_list)
         else:
             # Batch call reward model
@@ -632,9 +614,9 @@ class RemoteExperienceMaker(ABC):
         # Note: the results duplicated ring_attn_size * ds_tensor_parallel_size times
         # This is because the actors in ring group and tp group will return the same output
         duplicate_factor = args.ring_attn_size * args.ds_tensor_parallel_size
-        action_log_probs_list = sum(ray.get(action_log_probs_ref)[::duplicate_factor], [])
-        base_action_log_probs_list = sum(ray.get(base_action_log_probs_ref)[::duplicate_factor], [])
-        value_list = sum(ray.get(value_ref)[::duplicate_factor], [])
+        action_log_probs_list = sum(ray.get(action_log_probs_ref)[::duplicate_factor], []) # [2, 1140]
+        base_action_log_probs_list = sum(ray.get(base_action_log_probs_ref)[::duplicate_factor], []) # [2, 1140]
+        value_list = sum(ray.get(value_ref)[::duplicate_factor], []) # [2, 1140]
 
         # Process rewards based on source
         if samples_list[0].rewards is not None:
@@ -665,6 +647,8 @@ class RemoteExperienceMaker(ABC):
                     base_action_log_probs,
                     kl_estimator=self.strategy.args.kl_estimator,
                 )
+                print("zzaaaaaaa")
+                print(kl)
             else:
                 kl = torch.zeros_like(action_log_probs, dtype=action_log_probs.dtype, device=device)
             kl_mean = masked_mean(kl, samples.action_mask, dim=-1)
@@ -742,6 +726,8 @@ class RemoteExperienceMaker(ABC):
                 experience.info["group_reward_std"] = group_reward_std
 
         # reward shaping
+        print("test1111111")
+        print(args.advantage_estimator)
         if args.advantage_estimator == "rloo":
             baseline = (rewards.sum(-1, keepdim=True) - rewards) / (args.n_samples_per_prompt - 1)
             rewards = rewards - baseline
